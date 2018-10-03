@@ -110,7 +110,7 @@ def EstablishConnection():
     while True:
         if time.time() > timeout:
             print "[!] Connection Establishment Failed: Timeout"
-            return False
+            return None
         packet, addr = s.recvfrom(1024)
         headerRecv.copy(pickle.loads(packet))
         if (headerRecv.SYN == True and headerRecv.ackNum == lastSeqNum+1):
@@ -124,12 +124,12 @@ def EstablishConnection():
     header.clear()
     header.SYN = False
     header.seqNum = lastSeqNum + 1
-    header.ackNum = ackNumRecv + 1
+    header.ackNum = seqNumRecv + 1
     lastSeqNum += 1
-    lastAckNum = ackNumRecv + 1
+    lastAckNum = seqNumRecv + 1
     sendPacket(header, None)
     print "[+] Connection Established: 3rd Handshake"
-    return True
+    return (lastSeqNum, lastAckNum)
 
 
 # A simple mode with just IP, port and file
@@ -174,8 +174,11 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(ADDRESS)
 
 def main():
-    while not EstablishConnection():
-        continue
+    # A loop to ensure the connection is established
+    while True:
+        lastSeqAck = EstablishConnection()
+        if lastSeqAck != None:
+            break
     print "wtf"
 
 if __name__ == "__main__":

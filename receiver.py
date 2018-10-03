@@ -90,9 +90,10 @@ def EstablishConnection():
             header.SYN = True
             header.seqNum = lastSeqNum
             header.ackNum = seqNumRecv + 1
+            lastAckNum = seqNumRecv + 1
             sendPacket(header, addr)
             print "[+] Connection Established"
-            return True
+            return (lastSeqNum, lastAckNum)
         else:
             print "[!] Connection Establishing: False Packet received"
             continue
@@ -109,8 +110,8 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(ADDRESS)
 
 def main():
-    while not EstablishConnection():
-        continue
+    # Wait for a connection to be established
+    lastSeqAck = EstablishConnection()
     print "lol"
 
 if __name__ == "__main__":
