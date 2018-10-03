@@ -1,7 +1,8 @@
 #!/usr/bin/python
 
-import socket, pickle, sys
+import socket, pickle, sys, md5
 
+# Header structure and some useful functions
 class STPHeader:
     def __init__(self):
         self.srcPort = None
@@ -14,6 +15,7 @@ class STPHeader:
         self.ACK = False
         self.FIN = False
     
+    # Copy from another header structure
     def copy(self, header):
         self.srcPort = header.srcPort
         self.destPort = header.destPort
@@ -25,13 +27,26 @@ class STPHeader:
         self.ACK = header.ACK
         self.FIN = header.FIN
 
+    # Calculate the header's length
     def getHeaderLength(self):
         data = pickle.dumps(self)
         self.headerLength = len(data)
-        print self.headerLength
         data = pickle.dumps(self)
         self.headerLength = len(data)
-        print self.headerLength
+
+    # Generate the md5 checksum for the provided data
+    def generateChecksum(self, data):
+        m = md5.new()
+        m.update(data)
+        self.checksum = m.digest()
+
+    # Verify the md5 checksum with the provided data
+    def verifyChecksum(self, data):
+        m = md5.new()
+        m.update(data)
+        if m.digest() == self.checksum:
+            return True
+        return False
 
 LOCALHOST = "127.0.0.1"
 RECEIVER_PORT = None
@@ -54,4 +69,7 @@ while True:
     tmpHeader = pickle.loads(data)
     header.copy(tmpHeader)
     payload = data[header.headerLength:]
-    print payload
+    if header.verifyChecksum(payload):
+        print payload
+    else:
+        print "checksum failed"
