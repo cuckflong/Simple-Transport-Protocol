@@ -113,7 +113,7 @@ def EstablishConnection():
             return None
         packet, addr = s.recvfrom(1024)
         headerRecv.copy(pickle.loads(packet))
-        if (headerRecv.SYN == True and headerRecv.ackNum == lastSeqNum+1):
+        if (headerRecv.SYN == True and headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+1):
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
             print "[+] Connection Establishing: 2nd Handshake"

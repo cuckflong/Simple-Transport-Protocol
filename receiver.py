@@ -88,6 +88,7 @@ def EstablishConnection():
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
             header.SYN = True
+            header.ACK = True
             header.seqNum = lastSeqNum
             header.ackNum = seqNumRecv + 1
             lastAckNum = seqNumRecv + 1
