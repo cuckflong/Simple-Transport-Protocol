@@ -93,11 +93,39 @@ def EstablishConnection():
             header.ackNum = seqNumRecv + 1
             lastAckNum = seqNumRecv + 1
             sendPacket(header, addr)
-            print "[+] Connection Established"
-            return (lastSeqNum, lastAckNum)
+            break
         else:
             print "[!] Connection Establishing: False Packet received"
             continue
+    while True:
+        packet, addr = s.recvfrom(1024)
+        headerRecv.copy(pickle.loads(packet))
+        if headerRecv.ACK == True:
+            seqNumRecv = headerRecv.seqNum
+            ackNumRecv = headerRecv.ackNum
+            print "[+] Connection Established"
+            return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
+
+
+def CloseConnection(addr):
+    headerRecv = STPHeader()
+    header = STPHeader()
+    header.ACK = True
+    sendPacket(header, addr)
+    # Enter CLOSE_WAIT state
+    header.clear()
+    header.FIN = True
+    sendPacket(header, addr)
+    # Enter LAST_ACK state
+    while True:
+        packet, addr = s.recvfrom(1024)
+        headerRecv.copy(pickle.loads(packet))
+        if headerRecv.ACK == True:
+            s.close()
+            print "[+] Connection Closed"
+            return
+        else:
+            print "[!] LAST_ACK: Wrong Packet Received"
 
 try:
     RECEIVER_PORT = int(sys.argv[1])
@@ -111,9 +139,20 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(ADDRESS)
 
 def main():
+    headerRecv = STPHeader()
     # Wait for a connection to be established
-    lastSeqAck = EstablishConnection()
-    print "lol"
+    LastRecv = EstablishConnection()
+    while True:
+        packet, addr = s.recvfrom(1024)
+        headerRecv.copy(pickle.loads(packet))
+        # Check if the client want to close the connection
+        if headerRecv.FIN == True:
+            CloseConnection(addr)
+            print "[+] Exiting Program..."
+            sys.exit(0)
+        data = packet[headerRecv.headerLength:]
+        print data
+        print headerRecv.verifyChecksum(data)
 
 if __name__ == "__main__":
     main()
