@@ -9,8 +9,6 @@ STORED_FILE = None
 # Header structure and some useful functions
 class STPHeader:
     def __init__(self):
-        self.srcPort = None
-        self.destPort = None
         self.seqNum = None
         self.ackNum = None
         self.headerLength = None
@@ -21,8 +19,6 @@ class STPHeader:
     
     # Clear the header
     def clear(self):
-        self.srcPort = None
-        self.destPort = None
         self.seqNum = None
         self.ackNum = None
         self.headerLength = None
@@ -33,8 +29,6 @@ class STPHeader:
 
     # Copy from another header structure
     def copy(self, header):
-        self.srcPort = header.srcPort
-        self.destPort = header.destPort
         self.seqNum = header.seqNum
         self.ackNum = header.ackNum
         self.headerLength = header.headerLength
@@ -64,6 +58,17 @@ class STPHeader:
             return True
         return False
 
+    # Print the details of the header
+    def info(self):
+        print "################################################"
+        print "* [?] Header Details:                          *"
+        print "* [?]\tSequence Number: %-22s*" % self.seqNum
+        print "* [?]\tAcknoledgement Number: %-16s*" % self.ackNum
+        print "* [?]\tSYN: %-34s*" % self.SYN
+        print "* [?]\tACK: %-34s*" % self.ACK
+        print "* [?]\tFIN: %-34s*" % self.FIN
+        print "################################################"
+
 # Randomly generate the initial sequence number
 def initialSeqNum():
     return random.randint(0, 1000000)
@@ -71,6 +76,7 @@ def initialSeqNum():
 def sendPacket(header, addr):
     s.connect(addr)
     packet = pickle.dumps(header)
+    #header.info()
     s.send(packet)
 
 # Wait for a connection to be established
@@ -92,6 +98,7 @@ def EstablishConnection():
             header.seqNum = lastSeqNum
             header.ackNum = seqNumRecv + 1
             lastAckNum = seqNumRecv + 1
+            print "[+] Connection Establishing: Sending SYN/ACK Packet"
             sendPacket(header, addr)
             break
         else:
@@ -106,15 +113,31 @@ def EstablishConnection():
             print "[+] Connection Established"
             return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
 
+def HandlePacket(tmpHeader, data, SentRecv, addr):
+    lastSeqNum = SentRecv[0]
+    lastAckNum = SentRecv[1]
+    seqNumRecv = SentRecv[2]
+    ackNumRecv = SentRecv[3]
+    header = STPHeader()
+    headerRecv = STPHeader()
+    headerRecv.copy(tmpHeader)
+    print "Data Received: %s" % data
+    print "Verification: %s" % headerRecv.verifyChecksum(data)
+    header.ACK = True
+    header.ackNum = headerRecv.seqNum + len(data)
+    header.seqNum = headerRecv.ackNum
+    sendPacket(header, addr)
 
 def CloseConnection(addr):
     headerRecv = STPHeader()
     header = STPHeader()
     header.ACK = True
+    print "[+] Closing Connection: Sending ACK Packet"
     sendPacket(header, addr)
     # Enter CLOSE_WAIT state
     header.clear()
     header.FIN = True
+    print "[+] Closing Connection: Sending FIN Packet"
     sendPacket(header, addr)
     # Enter LAST_ACK state
     while True:
@@ -141,7 +164,7 @@ s.bind(ADDRESS)
 def main():
     headerRecv = STPHeader()
     # Wait for a connection to be established
-    LastRecv = EstablishConnection()
+    SentRecv = EstablishConnection()
     while True:
         packet, addr = s.recvfrom(1024)
         headerRecv.copy(pickle.loads(packet))
@@ -150,9 +173,9 @@ def main():
             CloseConnection(addr)
             print "[+] Exiting Program..."
             sys.exit(0)
-        data = packet[headerRecv.headerLength:]
-        print data
-        print headerRecv.verifyChecksum(data)
-
+        else:
+            data = packet[headerRecv.headerLength:]
+            HandlePacket(headerRecv, data, SentRecv, addr)
+        
 if __name__ == "__main__":
     main()

@@ -1,27 +1,33 @@
 #!/usr/bin/python
 
-import socket, pickle, sys, md5, random, time, binascii
+import socket, pickle, sys, md5, random, time, binascii, thread
 
+# Arguments
 RECEIVER_IP = None
 RECEIVER_PORT = None
 FILE = None
 MWS = None
-MSS = None
+MSS = 4
 GAMMA = None
 PDROP = 0
 PDUPLICATE = 0
 PCORRUPT = 0
 PORDER = 0
-MAXORDER = None
+MAXORDER = 0
 PDELAY = 0
-MAXDELAY = None
+MAXDELAY = 0
 SEED = None
+
+# Timeout Interval
+TIMEOUT = 2
+
+# Initial value for EstimatedRTT and DevRTT
+ESTRTT = 0.5    # 500 millisecond
+DEVRTT = 0.25   # 250 millisecond
 
 # Header structure and some useful functions
 class STPHeader:
     def __init__(self):
-        self.srcPort = None
-        self.destPort = None
         self.seqNum = None
         self.ackNum = None
         self.headerLength = None
@@ -32,8 +38,6 @@ class STPHeader:
     
     # Clear the header
     def clear(self):
-        self.srcPort = None
-        self.destPort = None
         self.seqNum = None
         self.ackNum = None
         self.headerLength = None
@@ -44,8 +48,6 @@ class STPHeader:
 
     # Copy from another header structure
     def copy(self, header):
-        self.srcPort = header.srcPort
-        self.destPort = header.destPort
         self.seqNum = header.seqNum
         self.ackNum = header.ackNum
         self.headerLength = header.headerLength
@@ -74,6 +76,17 @@ class STPHeader:
         if m.digest() == self.checksum:
             return True
         return False
+
+    # Print the details of the header
+    def info(self):
+        print "################################################"
+        print "* [?] Header Details:                          *"
+        print "* [?]\tSequence Number: %-22s*" % self.seqNum
+        print "* [?]\tAcknoledgement Number: %-16s*" % self.ackNum
+        print "* [?]\tSYN: %-34s*" % self.SYN
+        print "* [?]\tACK: %-34s*" % self.ACK
+        print "* [?]\tFIN: %-34s*" % self.FIN
+        print "################################################"
 
 class PacketLossDelay:
     def __init__(self):
@@ -107,6 +120,7 @@ class PacketLossDelay:
         header.getHeaderLength()
         packet = pickle.dumps(header)
         packet += data
+        print "[+] PLD: Sending Corrupted Packet"
         s.send(packet)
 
     def checkHeldPacket(self):
@@ -122,13 +136,20 @@ class PacketLossDelay:
         else:
             print "[+] PLD: No Held Back Packet"
 
+    def sendDelayPacket(self, header, data):
+        delay = random.uniform(0, MAXDELAY)
+        print "[+] Delaying for %s seconds" % delay
+        time.sleep(delay)
+        print "[+] PLD: Sending Delayed Packet"
+        sendPacket(header, data)
+
     def sendPLDPacket(self, header, data):
         if self.flip(PDROP):
             print "[+] PLD: Packet Dropped"
             self.checkHeldPacket()
             return
         if self.flip(PDUPLICATE):
-            print "[+] PLD: Sending Duplicate Packets"
+            print "[+] PLD: Duplicating Packet"
             sendPacket(header, data)
             sendPacket(header, data)
             self.checkHeldPacket()
@@ -143,18 +164,26 @@ class PacketLossDelay:
             if self.heldPacket != None:
                 print "[+] PLD: A Packet Already On Hold, Sending Current Packet"
                 sendPacket(header, data)
+                self.checkHeldPacket()
+                return
+            if MAXORDER == 0:
+                print "[+] PLD: MAXORDER=0, No Need To Hold Packet, Sending Current Packet"
+                sendPacket(header, data)
                 return
             print "[+] PLD: Holding Back For %d Packets" % (MAXORDER)
             self.heldPacket = (header, data)
             self.waited = 0
             return
         if self.flip(PDELAY):
-            print "[+] PLD: Delaying Packets"
-            delay = random.uniform(0, MAXDELAY)
-            time.sleep(delay)
-            sendPacket(header, data)
+            print "[+] PLD: Delaying Packet"
+            # Start a new thread to simulate the delay packet
+            try:
+                thread.start_new_thread(self.sendDelayPacket, (header, data))
+            except:
+                print "[!] PLD DELAY ERROR: Unable To Start Thread"
             self.checkHeldPacket()
             return
+
         print "[+] PLD: Sending Normal Packet"
         sendPacket(header, data)
         self.checkHeldPacket()
@@ -167,12 +196,16 @@ def sendPacket(header, data):
     packet = pickle.dumps(header)
     if data != None:
         packet += data
+    #header.info()
+    print "[+] Sending Packet With Data: %s" % data
     s.send(packet)
 
 # Read data from the provided file
 def getDataFromFile():
     f = open(FILE, "r")
-    return f.read()
+    data = f.read()
+    f.close()
+    return data
 
 # Randomly generate the initial sequence number
 def initialSeqNum():
@@ -188,15 +221,14 @@ def EstablishConnection():
     seqNumRecv = None
     ackNumRecv = None
     header.seqNum = lastSeqNum
-    sendPacket(header, None)
     print "[+] Connection Establishing: 1st Handshake"
-    # Set a timeout value for receiving the 2nd handshake
-    timeout = time.time() + 2
+    sendPacket(header, None)
     while True:
-        if time.time() > timeout:
+        try:
+            packet, addr = s.recvfrom(1024+MSS)
+        except socket.timeout:
             print "[!] Connection Establishment Failed: Timeout"
             return None
-        packet, addr = s.recvfrom(1024)
         headerRecv.copy(pickle.loads(packet))
         if (headerRecv.SYN == True and headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+1):
             seqNumRecv = headerRecv.seqNum
@@ -212,19 +244,59 @@ def EstablishConnection():
     header.ackNum = seqNumRecv + 1
     lastSeqNum += 1
     lastAckNum = seqNumRecv + 1
-    sendPacket(header, None)
     print "[+] Connection Established: 3rd Handshake"
+    sendPacket(header, None)
     return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
+
+# Transfer the file to server without pipelining
+def SendFile(SentRecv):
+    lastSeqNum = SentRecv[0]
+    lastAckNum = SentRecv[1]
+    seqNumRecv = SentRecv[2]
+    ackNumRecv = SentRecv[3]
+    header = STPHeader()
+    headerRecv = STPHeader()
+    data = getDataFromFile()
+    segmentData = None
+    offset = 0
+    sentDataLen = 0
+    header.SYN = True
+    while len(data[offset:]) > 0:
+        header.seqNum = lastSeqNum
+        header.ackNum = lastAckNum
+        if len(data[offset:]) > MSS:
+            segmentData = data[offset:offset+MSS+1]
+        else:
+            segmentData = data[offset:]
+        sentDataLen = len(segmentData)
+        pld.sendPLDPacket(header, segmentData)
+        while True:
+            try:
+                packet, addr = s.recvfrom(1024+MSS)
+            except socket.timeout:
+                print "[!] Receiving ACK Timeout, Sending Packet Again"
+                break
+            headerRecv.copy(pickle.loads(packet))
+            if headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+sentDataLen:
+                print "[+] ACK Received"
+                seqNumRecv = headerRecv.seqNum
+                ackNumRecv = headerRecv.ackNum
+                offset += sentDataLen
+                lastSeqNum = ackNumRecv
+                lastAckNum = seqNumRecv + 1
+                break
+
 
 # Closing the connection
 def CloseConnection():
     headerRecv = STPHeader()
     header = STPHeader()
     header.FIN = True
+    print "[+] Closing Connection: Sending FIN Packet"
     sendPacket(header, None)
     # Enter FIN_WAIT_1 state
     while True:
-        packet, addr = s.recvfrom(1024)
+        packet, addr = s.recvfrom(1024+MSS)
         headerRecv.copy(pickle.loads(packet))
         if headerRecv.ACK == True:
             print "[+] FIN_WAIT_1: Done"
@@ -234,11 +306,12 @@ def CloseConnection():
             continue
     # Enter FIN_WAIT_2 state
     while True:
-        packet, addr = s.recvfrom(1024)
+        packet, addr = s.recvfrom(1024+MSS)
         headerRecv.copy(pickle.loads(packet))
         if headerRecv.FIN == True:
             header.clear()
             header.ACK = True
+            print "Closing Connection: Sending ACK Packet"
             sendPacket(header, None)
             print "[+] FIN_WAIT_2: Done"
             break
@@ -287,12 +360,17 @@ else:
 if SEED != None:
     random.seed(SEED)
 
+# Set initial timeout interval
+if GAMMA != None:
+    TIMEOUT = ESTRTT + GAMMA*DEVRTT
+
 # Address from the give IP and Port
 ADDRESS = (RECEIVER_IP, RECEIVER_PORT)
 
 # Create a global socket and connect to it
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(ADDRESS)
+s.settimeout(TIMEOUT)
 
 # Module for Packet Loss and Delay
 pld = PacketLossDelay()
@@ -300,12 +378,14 @@ pld = PacketLossDelay()
 def main():
     # A loop to ensure the connection is established
     while True:
-        LastRecv = EstablishConnection()
-        if LastRecv != None:
+        SentRecv = EstablishConnection()
+        if SentRecv != None:
             break
-    header = STPHeader()
-    data = "12345678910abcdefghij"
-    pld.sendPLDPacket(header, data)
+
+    # File Transfer State
+    SendFile(SentRecv)
+
+    # Closing Connection
     CloseConnection()
 
 if __name__ == "__main__":
