@@ -145,13 +145,11 @@ class PacketLossDelay:
             print "[+] PLD: No Held Back Packet"
 
     def sendDelayPacket(self, header, data):
-        global TIMER
         delay = random.uniform(0, MAXDELAY)
         print "[+] Delaying for %s seconds" % delay
         time.sleep(delay)
         print "[+] PLD: Sending Delayed Packet"
         sendPacket(header, data)
-        TIMER = time.time()
 
     def sendPLDPacket(self, header, data):
         if self.flip(PDROP):
@@ -198,7 +196,9 @@ class PacketLossDelay:
             try:
                 thread.start_new_thread(self.sendDelayPacket, (tmpHeader, data))
             except:
-                print "[!] PLD DELAY ERROR: Unable To Start Thread"
+                thread.exit()
+            global TIMER
+            TIMER = time.time()
             self.checkHeldPacket()
             return
 
@@ -322,6 +322,7 @@ def SendFile(SentRecv):
 
 # Closing the connection
 def CloseConnection():
+    #s.settimeout(1)
     headerRecv = STPHeader()
     header = STPHeader()
     header.FIN = True
@@ -329,7 +330,10 @@ def CloseConnection():
     sendPacket(header, None)
     # Enter FIN_WAIT_1 state
     while True:
-        packet, addr = s.recvfrom(1024+MSS)
+        try:
+            packet, addr = s.recvfrom(1024+MSS)
+        except socket.timeout:
+             continue
         headerRecv.copy(pickle.loads(packet))
         if headerRecv.ACK == True:
             print "[+] FIN_WAIT_1: Done"
@@ -339,7 +343,10 @@ def CloseConnection():
             continue
     # Enter FIN_WAIT_2 state
     while True:
-        packet, addr = s.recvfrom(1024+MSS)
+        try:
+            packet, addr = s.recvfrom(1024+MSS)
+        except socket.timeout:
+             continue
         headerRecv.copy(pickle.loads(packet))
         if headerRecv.FIN == True:
             header.clear()
@@ -380,7 +387,7 @@ else:
         PORDER = float(sys.argv[10])
         MAXORDER = int(sys.argv[11])
         PDELAY = float(sys.argv[12])
-        MAXDELAY = float(sys.argv[13])
+        MAXDELAY = float(sys.argv[13])/1000
         SEED = float(sys.argv[14])
 
     except:
