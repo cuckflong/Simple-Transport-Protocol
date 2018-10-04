@@ -73,6 +73,15 @@ class STPHeader:
 def initialSeqNum():
     return random.randint(0, 1000000)
 
+def clearFile():
+    f = open(STORED_FILE, "w")
+    f.close()
+
+def appendDataToFile(data):
+    f = open(STORED_FILE, "a")
+    f.write(data)
+    f.close()
+
 def sendPacket(header, addr):
     s.connect(addr)
     packet = pickle.dumps(header)
@@ -113,20 +122,38 @@ def EstablishConnection():
             print "[+] Connection Established"
             return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
 
-def HandlePacket(tmpHeader, data, SentRecv, addr):
+def HandlePackets(SentRecv):
+    header = STPHeader()
+    headerRecv = STPHeader()
     lastSeqNum = SentRecv[0]
     lastAckNum = SentRecv[1]
     seqNumRecv = SentRecv[2]
     ackNumRecv = SentRecv[3]
-    header = STPHeader()
-    headerRecv = STPHeader()
-    headerRecv.copy(tmpHeader)
-    print "Data Received: %s" % data
-    print "Verification: %s" % headerRecv.verifyChecksum(data)
-    header.ACK = True
-    header.ackNum = headerRecv.seqNum + len(data)
-    header.seqNum = headerRecv.ackNum
-    sendPacket(header, addr)
+    while True:
+        packet, addr = s.recvfrom(1024)
+        headerRecv.copy(pickle.loads(packet))
+        if headerRecv.FIN == True:
+            CloseConnection(addr)
+            return
+        data = packet[headerRecv.headerLength:]
+        if headerRecv.seqNum == lastAckNum:
+            if headerRecv.verifyChecksum(data):
+                print "[+] Correct Data Received"
+                #print "[+] Data: %s" % data
+                appendDataToFile(data)
+                header.ACK = True
+                header.ackNum = headerRecv.seqNum + len(data)
+                header.seqNum = headerRecv.ackNum
+                sendPacket(header, addr)
+                seqNumRecv = headerRecv.seqNum
+                ackNumRecv = headerRecv.ackNum
+                lastSeqNum = header.seqNum
+                lastAckNum = header.ackNum
+            else:
+                print "[!] Corrupted Data Received"
+                #print "[!] Corrupted Data: %s" % data
+        else:
+            print "[!] Wrong Packet Received"
 
 def CloseConnection(addr):
     headerRecv = STPHeader()
@@ -157,25 +184,21 @@ except:
     print "Usage:\tpython receiver.py <receiver_port> <file_r.pdf>"
     sys.exit(1)
 
+# Create a global socket and bind to it
 ADDRESS = (LOCALHOST, RECEIVER_PORT)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(ADDRESS)
 
+# Clear the data in file
+clearFile()
+
 def main():
-    headerRecv = STPHeader()
     # Wait for a connection to be established
     SentRecv = EstablishConnection()
-    while True:
-        packet, addr = s.recvfrom(1024)
-        headerRecv.copy(pickle.loads(packet))
-        # Check if the client want to close the connection
-        if headerRecv.FIN == True:
-            CloseConnection(addr)
-            print "[+] Exiting Program..."
-            sys.exit(0)
-        else:
-            data = packet[headerRecv.headerLength:]
-            HandlePacket(headerRecv, data, SentRecv, addr)
-        
+    # Handle Remaining Packets
+    HandlePackets(SentRecv)
+    print "[+] Exiting Program"
+    sys.exit(0)
+
 if __name__ == "__main__":
     main()

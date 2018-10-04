@@ -19,11 +19,14 @@ MAXDELAY = 0
 SEED = None
 
 # Timeout Interval
-TIMEOUT = 2
+TIMEOUT = 0
 
 # Initial value for EstimatedRTT and DevRTT
 ESTRTT = 0.5    # 500 millisecond
 DEVRTT = 0.25   # 250 millisecond
+
+# Timer
+TIMER = 0
 
 # Header structure and some useful functions
 class STPHeader:
@@ -100,13 +103,14 @@ class PacketLossDelay:
         else:
             return False
     def sendCorruptPacket(self, header, data):
+        global TIMER
         if data == None:
             sendPacket(header, data)
             return
         # Calculate the checksum before corrupting the data
         header.generateChecksum(data)
         # Reverse one bit of the data
-        print "[+] PLD: Original Data: %s" % (data)
+        #print "[+] PLD: Original Data: %s" % (data)
         binData = bin(int(binascii.hexlify(data), 16))
         randomOffset = random.randint(2, len(binData)-1)
         binDataList = list(binData)
@@ -115,18 +119,22 @@ class PacketLossDelay:
         else: 
             binDataList[randomOffset] = "1"
         binData = "".join(binDataList)
-        data = binascii.unhexlify('%x' % int(binData, 2))
-        print "[+] PLD: Corrupted Data: %s" % (data)
+        try:
+            data = binascii.unhexlify('%x' % int(binData, 2))
+        except:
+            data = binascii.unhexlify('0%x' % int(binData, 2))
+        #print "[+] PLD: Corrupted Data: %s" % (data)
         header.getHeaderLength()
         packet = pickle.dumps(header)
         packet += data
         print "[+] PLD: Sending Corrupted Packet"
         s.send(packet)
+        TIMER = time.time()
 
     def checkHeldPacket(self):
         if self.heldPacket != None:
             self.waited += 1
-            if self.waited == MAXORDER:
+            if self.waited >= MAXORDER:
                 print "[+] PLD: Re-Order Wait Finished, Sending Held Back Packet"
                 sendPacket(self.heldPacket[0], self.heldPacket[1])
                 self.heldPacket = None
@@ -137,25 +145,31 @@ class PacketLossDelay:
             print "[+] PLD: No Held Back Packet"
 
     def sendDelayPacket(self, header, data):
+        global TIMER
         delay = random.uniform(0, MAXDELAY)
         print "[+] Delaying for %s seconds" % delay
         time.sleep(delay)
         print "[+] PLD: Sending Delayed Packet"
         sendPacket(header, data)
+        TIMER = time.time()
 
     def sendPLDPacket(self, header, data):
         if self.flip(PDROP):
             print "[+] PLD: Packet Dropped"
+            if self.heldPacket != None:
+                self.waited -= 1
             self.checkHeldPacket()
             return
         if self.flip(PDUPLICATE):
             print "[+] PLD: Duplicating Packet"
             sendPacket(header, data)
             sendPacket(header, data)
+            if self.heldPacket != None:
+                self.waited += 1
             self.checkHeldPacket()
             return
         if self.flip(PCORRUPT):
-            print "[+] PLD: Sending Corrupted Packet"
+            print "[+] PLD: Corrupting Packet"
             self.sendCorruptPacket(header, data)
             self.checkHeldPacket()
             return
@@ -171,14 +185,18 @@ class PacketLossDelay:
                 sendPacket(header, data)
                 return
             print "[+] PLD: Holding Back For %d Packets" % (MAXORDER)
-            self.heldPacket = (header, data)
+            newHeader = STPHeader()
+            newHeader.copy(header)
+            self.heldPacket = (newHeader, data)
             self.waited = 0
             return
         if self.flip(PDELAY):
+            tmpHeader = STPHeader()
             print "[+] PLD: Delaying Packet"
+            tmpHeader.copy(header)
             # Start a new thread to simulate the delay packet
             try:
-                thread.start_new_thread(self.sendDelayPacket, (header, data))
+                thread.start_new_thread(self.sendDelayPacket, (tmpHeader, data))
             except:
                 print "[!] PLD DELAY ERROR: Unable To Start Thread"
             self.checkHeldPacket()
@@ -190,6 +208,7 @@ class PacketLossDelay:
 
 
 def sendPacket(header, data):
+    global TIMER
     if data != None:
         header.generateChecksum(data)
     header.getHeaderLength()
@@ -197,8 +216,9 @@ def sendPacket(header, data):
     if data != None:
         packet += data
     #header.info()
-    print "[+] Sending Packet With Data: %s" % data
+    #print "[+] Sending Packet With Data: %s" % data
     s.send(packet)
+    TIMER = time.time()
 
 # Read data from the provided file
 def getDataFromFile():
@@ -250,6 +270,9 @@ def EstablishConnection():
 
 # Transfer the file to server without pipelining
 def SendFile(SentRecv):
+    global ESTRTT
+    global DEVRTT
+    global TIMEOUT
     lastSeqNum = SentRecv[0]
     lastAckNum = SentRecv[1]
     seqNumRecv = SentRecv[2]
@@ -265,18 +288,28 @@ def SendFile(SentRecv):
         header.seqNum = lastSeqNum
         header.ackNum = lastAckNum
         if len(data[offset:]) > MSS:
-            segmentData = data[offset:offset+MSS+1]
+            segmentData = data[offset:offset+MSS]
         else:
             segmentData = data[offset:]
         sentDataLen = len(segmentData)
+        #print "[+] Sending Data: %s" % segmentData
         pld.sendPLDPacket(header, segmentData)
         while True:
             try:
                 packet, addr = s.recvfrom(1024+MSS)
+                sampleRTT = time.time()-TIMER
+                ESTRTT = 0.875*ESTRTT + 0.125*(sampleRTT)
+                DEVRTT = 0.75*DEVRTT + 0.25*abs(sampleRTT-ESTRTT)
+                TIMEOUT = ESTRTT + GAMMA*DEVRTT
+                print TIMEOUT
+                s.settimeout(TIMEOUT)
             except socket.timeout:
                 print "[!] Receiving ACK Timeout, Sending Packet Again"
+                s.settimeout(TIMEOUT)
                 break
             headerRecv.copy(pickle.loads(packet))
+            #headerRecv.info()
+            #print "[+] Packet Received"
             if headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+sentDataLen:
                 print "[+] ACK Received"
                 seqNumRecv = headerRecv.seqNum
