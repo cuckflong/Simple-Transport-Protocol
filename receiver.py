@@ -26,6 +26,26 @@ class STPHeader:
         self.SYN = False
         self.ACK = False
         self.FIN = False
+    
+    def pack(self):
+        pack = []
+        pack.append(self.seqNum)
+        pack.append(self.ackNum)
+        pack.append(self.headerLength)
+        pack.append(self.checksum)
+        pack.append(self.SYN)
+        pack.append(self.ACK)
+        pack.append(self.FIN)
+        return pack
+
+    def unpack(self, pack):
+        self.seqNum = pack[0]
+        self.ackNum = pack[1]
+        self.headerLength = pack[2]
+        self.checksum = pack[3]
+        self.SYN = pack[4]
+        self.ACK = pack[5]
+        self.FIN = pack[6]
 
     # Copy from another header structure
     def copy(self, header):
@@ -39,9 +59,9 @@ class STPHeader:
 
     # Calculate the header's length
     def getHeaderLength(self):
-        data = pickle.dumps(self)
+        data = pickle.dumps(self.pack())
         self.headerLength = len(data)
-        data = pickle.dumps(self)
+        data = pickle.dumps(self.pack())
         self.headerLength = len(data)
 
     # Generate the md5 checksum for the provided data
@@ -84,7 +104,7 @@ def appendDataToFile(data):
 
 def sendPacket(header, addr):
     s.connect(addr)
-    packet = pickle.dumps(header)
+    packet = pickle.dumps(header.pack())
     #header.info()
     s.send(packet)
 
@@ -98,7 +118,7 @@ def EstablishConnection():
     ackNumRecv = None
     while True:
         packet, addr = s.recvfrom(1024)
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if headerRecv.SYN == True:
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
@@ -115,7 +135,7 @@ def EstablishConnection():
             continue
     while True:
         packet, addr = s.recvfrom(1024)
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if headerRecv.ACK == True:
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
@@ -129,31 +149,70 @@ def HandlePackets(SentRecv):
     lastAckNum = SentRecv[1]
     seqNumRecv = SentRecv[2]
     ackNumRecv = SentRecv[3]
+    bufferInfo = []
     while True:
+        # print len(bufferInfo)
         packet, addr = s.recvfrom(1024)
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if headerRecv.FIN == True:
             CloseConnection(addr)
             return
         data = packet[headerRecv.headerLength:]
-        if headerRecv.seqNum == lastAckNum:
-            if headerRecv.verifyChecksum(data):
-                print "[+] Correct Data Received"
-                #print "[+] Data: %s" % data
-                appendDataToFile(data)
+        header.clear()
+        if not headerRecv.verifyChecksum(data) or headerRecv.seqNum < lastAckNum:
+            print "[!] Corrupted Data Received"
+            header.ACK = True
+            header.ackNum = lastAckNum
+            header.seqNum = lastSeqNum
+        elif headerRecv.seqNum == lastAckNum:
+            print "[+] Correct Data Received"
+            #print "[+] Data: %s" % data
+            appendDataToFile(data)
+            if bufferInfo:
+                nextSeq = headerRecv.seqNum
+                nextLen = len(data)
+                for i in range(len(bufferInfo)):
+                    info = bufferInfo[i]
+                    if nextSeq + nextLen == info[0]:
+                        appendDataToFile(info[3])
+                        nextSeq = info[0]
+                        nextLen = info[2]
+                        header.ACK = True
+                        header.ackNum = nextSeq + nextLen
+                        header.seqNum = info[1]
+                    else:
+                        bufferInfo = bufferInfo[i:]
+                        break
+            else:
                 header.ACK = True
                 header.ackNum = headerRecv.seqNum + len(data)
                 header.seqNum = headerRecv.ackNum
-                sendPacket(header, addr)
-                seqNumRecv = headerRecv.seqNum
-                ackNumRecv = headerRecv.ackNum
-                lastSeqNum = header.seqNum
-                lastAckNum = header.ackNum
+        elif headerRecv.seqNum > lastAckNum:
+            # Sequence Number, Acknoledgement Number, Length Of Data, Data 
+            dataInfo = (int(headerRecv.seqNum), int(headerRecv.ackNum), len(data), data)
+            if not bufferInfo:
+                bufferInfo.append(dataInfo)
+                continue
             else:
-                print "[!] Corrupted Data Received"
-                #print "[!] Corrupted Data: %s" % data
-        else:
-            print "[!] Wrong Packet Received"
+                inserted = False
+                for i in range(len(bufferInfo)):
+                    info = bufferInfo[i]
+                    if dataInfo[0] + dataInfo[2] <= info[0]:
+                        inserted = True
+                        bufferInfo.insert(i, dataInfo)
+                        break
+                    else:
+                        continue
+                if not inserted:
+                    bufferInfo.append(dataInfo)
+            header.ACK = True
+            header.ackNum = lastAckNum
+            header.seqNum = lastSeqNum
+        seqNumRecv = headerRecv.seqNum
+        ackNumRecv = headerRecv.ackNum
+        lastSeqNum = header.seqNum
+        lastAckNum = header.ackNum   
+        sendPacket(header, addr)             
 
 def CloseConnection(addr):
     headerRecv = STPHeader()
@@ -169,7 +228,7 @@ def CloseConnection(addr):
     # Enter LAST_ACK state
     while True:
         packet, addr = s.recvfrom(1024)
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if headerRecv.ACK == True:
             s.close()
             print "[+] Connection Closed"
@@ -189,12 +248,11 @@ ADDRESS = (LOCALHOST, RECEIVER_PORT)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(ADDRESS)
 
-# Clear the data in file
-clearFile()
-
 def main():
     # Wait for a connection to be established
     SentRecv = EstablishConnection()
+    # Clear the data in file
+    clearFile()
     # Handle Remaining Packets
     HandlePackets(SentRecv)
     print "[+] Exiting Program"

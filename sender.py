@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import socket, pickle, sys, md5, random, time, binascii, thread
+import socket, pickle, sys, md5, random, time, binascii, threading
 
 # Arguments
 RECEIVER_IP = None
@@ -48,6 +48,26 @@ class STPHeader:
         self.SYN = False
         self.ACK = False
         self.FIN = False
+    
+    def pack(self):
+        pack = []
+        pack.append(self.seqNum)
+        pack.append(self.ackNum)
+        pack.append(self.headerLength)
+        pack.append(self.checksum)
+        pack.append(self.SYN)
+        pack.append(self.ACK)
+        pack.append(self.FIN)
+        return pack
+
+    def unpack(self, pack):
+        self.seqNum = pack[0]
+        self.ackNum = pack[1]
+        self.headerLength = pack[2]
+        self.checksum = pack[3]
+        self.SYN = pack[4]
+        self.ACK = pack[5]
+        self.FIN = pack[6]
 
     # Copy from another header structure
     def copy(self, header):
@@ -61,9 +81,9 @@ class STPHeader:
 
     # Calculate the header's length
     def getHeaderLength(self):
-        data = pickle.dumps(self)
+        data = pickle.dumps(self.pack())
         self.headerLength = len(data)
-        data = pickle.dumps(self)
+        data = pickle.dumps(self.pack())
         self.headerLength = len(data)
 
     # Generate the md5 checksum for the provided data
@@ -102,8 +122,8 @@ class PacketLossDelay:
             return True
         else:
             return False
+
     def sendCorruptPacket(self, header, data):
-        global TIMER
         if data == None:
             sendPacket(header, data)
             return
@@ -125,64 +145,62 @@ class PacketLossDelay:
             data = binascii.unhexlify('0%x' % int(binData, 2))
         #print "[+] PLD: Corrupted Data: %s" % (data)
         header.getHeaderLength()
-        packet = pickle.dumps(header)
+        packet = pickle.dumps(header.pack())
         packet += data
-        print "[+] PLD: Sending Corrupted Packet"
+        print "[+] PLD CORRUPT: Sending Corrupted Packet"
         s.send(packet)
-        TIMER = time.time()
 
     def checkHeldPacket(self):
         if self.heldPacket != None:
             self.waited += 1
             if self.waited >= MAXORDER:
-                print "[+] PLD: Re-Order Wait Finished, Sending Held Back Packet"
+                print "[+] PLD REORDER: Re-Order Wait Finished, Sending Held Back Packet"
                 sendPacket(self.heldPacket[0], self.heldPacket[1])
                 self.heldPacket = None
                 self.waited = 0
             else:
-                print "[+] PLD: Already Held Back For %d Packet" % (self.waited)
+                print "[+] PLD REORDER: Already Held Back For %d Packet" % (self.waited)
         else:
-            print "[+] PLD: No Held Back Packet"
+            print "[+] PLD REORDER: No Held Back Packet"
 
     def sendDelayPacket(self, header, data):
         delay = random.uniform(0, MAXDELAY)
-        print "[+] Delaying for %s seconds" % delay
+        print "[+] PLD DELAY: Delaying For %s Seconds" % delay
         time.sleep(delay)
-        print "[+] PLD: Sending Delayed Packet"
-        sendPacket(header, data)
+        try:         
+            sendPacket(header, data)
+            print "[+] PLD DELAY: Sending Delayed Packet With %s Seconds Delay" % delay
+        except:
+            sys.exit(1)
 
     def sendPLDPacket(self, header, data):
         if self.flip(PDROP):
-            print "[+] PLD: Packet Dropped"
-            if self.heldPacket != None:
-                self.waited -= 1
+            print "[+] PLD DROP: Packet Dropped"
             self.checkHeldPacket()
             return
         if self.flip(PDUPLICATE):
-            print "[+] PLD: Duplicating Packet"
+            print "[+] PLD DUPLICATE: Duplicating Packet"
             sendPacket(header, data)
             sendPacket(header, data)
-            if self.heldPacket != None:
-                self.waited += 1
             self.checkHeldPacket()
             return
         if self.flip(PCORRUPT):
-            print "[+] PLD: Corrupting Packet"
+            print "[+] PLD CORRUPT: Corrupting Packet"
             self.sendCorruptPacket(header, data)
             self.checkHeldPacket()
             return
         if self.flip(PORDER):
-            print "[+] PLD: Reordering Packets"
+            print "[+] PLD REORDER: Reordering Packets"
             if self.heldPacket != None:
-                print "[+] PLD: A Packet Already On Hold, Sending Current Packet"
+                print "[+] PLD REORDER: A Packet Already On Hold, Sending Current Packet"
                 sendPacket(header, data)
                 self.checkHeldPacket()
                 return
             if MAXORDER == 0:
-                print "[+] PLD: MAXORDER=0, No Need To Hold Packet, Sending Current Packet"
+                print "[+] PLD REORDER: MAXORDER=0, No Need To Hold Packet, Sending Current Packet"
                 sendPacket(header, data)
                 return
-            print "[+] PLD: Holding Back For %d Packets" % (MAXORDER)
+            print "[+] PLD REORDER: Holding Back For %d Packets" % (MAXORDER)
             newHeader = STPHeader()
             newHeader.copy(header)
             self.heldPacket = (newHeader, data)
@@ -190,35 +208,33 @@ class PacketLossDelay:
             return
         if self.flip(PDELAY):
             tmpHeader = STPHeader()
-            print "[+] PLD: Delaying Packet"
+            print "[+] PLD DELAY: Delaying Packet"
             tmpHeader.copy(header)
             # Start a new thread to simulate the delay packet
             try:
-                thread.start_new_thread(self.sendDelayPacket, (tmpHeader, data))
+                t = threading.Thread(target=self.sendDelayPacket, args=(tmpHeader, data))
+                t.start()
             except:
-                thread.exit()
-            global TIMER
-            TIMER = time.time()
+                print "Threading Exception"
+                sys.exit(1)
             self.checkHeldPacket()
             return
 
-        print "[+] PLD: Sending Normal Packet"
+        print "[+] PLD NORMAL: Sending Normal Packet"
         sendPacket(header, data)
         self.checkHeldPacket()
 
 
 def sendPacket(header, data):
-    global TIMER
-    if data != None:
+    if data != None:   
         header.generateChecksum(data)
     header.getHeaderLength()
-    packet = pickle.dumps(header)
+    packet = pickle.dumps(header.pack())
     if data != None:
         packet += data
     #header.info()
     #print "[+] Sending Packet With Data: %s" % data
     s.send(packet)
-    TIMER = time.time()
 
 # Read data from the provided file
 def getDataFromFile():
@@ -249,7 +265,7 @@ def EstablishConnection():
         except socket.timeout:
             print "[!] Connection Establishment Failed: Timeout"
             return None
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if (headerRecv.SYN == True and headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+1):
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
@@ -273,6 +289,7 @@ def SendFile(SentRecv):
     global ESTRTT
     global DEVRTT
     global TIMEOUT
+    global TIMER
     lastSeqNum = SentRecv[0]
     lastAckNum = SentRecv[1]
     seqNumRecv = SentRecv[2]
@@ -294,6 +311,7 @@ def SendFile(SentRecv):
         sentDataLen = len(segmentData)
         #print "[+] Sending Data: %s" % segmentData
         pld.sendPLDPacket(header, segmentData)
+        TIMER = time.time()
         while True:
             try:
                 packet, addr = s.recvfrom(1024+MSS)
@@ -301,13 +319,12 @@ def SendFile(SentRecv):
                 ESTRTT = 0.875*ESTRTT + 0.125*(sampleRTT)
                 DEVRTT = 0.75*DEVRTT + 0.25*abs(sampleRTT-ESTRTT)
                 TIMEOUT = ESTRTT + GAMMA*DEVRTT
-                print TIMEOUT
+                print "TIMEOUT INTERVAL: %s" % TIMEOUT
                 s.settimeout(TIMEOUT)
             except socket.timeout:
                 print "[!] Receiving ACK Timeout, Sending Packet Again"
-                s.settimeout(TIMEOUT)
                 break
-            headerRecv.copy(pickle.loads(packet))
+            headerRecv.unpack(pickle.loads(packet))
             #headerRecv.info()
             #print "[+] Packet Received"
             if headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+sentDataLen:
@@ -319,6 +336,56 @@ def SendFile(SentRecv):
                 lastAckNum = seqNumRecv + 1
                 break
 
+def PipelineSendFile(SentRecv):
+    global ESTRTT
+    global DEVRTT
+    global TIMEOUT
+    global TIMER
+    lastSeqNum = SentRecv[0]
+    lastAckNum = SentRecv[1]
+    seqNumRecv = SentRecv[2]
+    ackNumRecv = SentRecv[3]
+    header = STPHeader()
+    headerRecv = STPHeader()
+    data = getDataFromFile()
+    segmentData = None
+    offset = 0
+    sentDataLen = 0
+    header.SYN = True
+    while len(data[offset:]) > 0:
+        header.seqNum = lastSeqNum
+        header.ackNum = lastAckNum
+        if len(data[offset:]) > MSS:
+            segmentData = data[offset:offset+MSS]
+        else:
+            segmentData = data[offset:]
+        sentDataLen = len(segmentData)
+        #print "[+] Sending Data: %s" % segmentData
+        pld.sendPLDPacket(header, segmentData)
+        TIMER = time.time()
+        while True:
+            try:
+                packet, addr = s.recvfrom(1024+MSS)
+                sampleRTT = time.time()-TIMER
+                ESTRTT = 0.875*ESTRTT + 0.125*(sampleRTT)
+                DEVRTT = 0.75*DEVRTT + 0.25*abs(sampleRTT-ESTRTT)
+                TIMEOUT = ESTRTT + GAMMA*DEVRTT
+                print "TIMEOUT INTERVAL: %s" % TIMEOUT
+                s.settimeout(TIMEOUT)
+            except socket.timeout:
+                print "[!] Receiving ACK Timeout, Sending Packet Again"
+                break
+            headerRecv.unpack(pickle.loads(packet))
+            #headerRecv.info()
+            #print "[+] Packet Received"
+            if headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+sentDataLen:
+                print "[+] ACK Received"
+                seqNumRecv = headerRecv.seqNum
+                ackNumRecv = headerRecv.ackNum
+                offset += sentDataLen
+                lastSeqNum = ackNumRecv
+                lastAckNum = seqNumRecv + 1
+                break
 
 # Closing the connection
 def CloseConnection():
@@ -334,7 +401,7 @@ def CloseConnection():
             packet, addr = s.recvfrom(1024+MSS)
         except socket.timeout:
              continue
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if headerRecv.ACK == True:
             print "[+] FIN_WAIT_1: Done"
             break
@@ -347,7 +414,7 @@ def CloseConnection():
             packet, addr = s.recvfrom(1024+MSS)
         except socket.timeout:
              continue
-        headerRecv.copy(pickle.loads(packet))
+        headerRecv.unpack(pickle.loads(packet))
         if headerRecv.FIN == True:
             header.clear()
             header.ACK = True
