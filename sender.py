@@ -27,6 +27,7 @@ DEVRTT = 0.25   # 250 millisecond
 
 # Timer
 TIMER = 0
+TIMERLIST = []
 
 # Header structure and some useful functions
 class STPHeader:
@@ -130,7 +131,7 @@ class PacketLossDelay:
         # Calculate the checksum before corrupting the data
         header.generateChecksum(data)
         # Reverse one bit of the data
-        #print "[+] PLD: Original Data: %s" % (data)
+        # print "[+] PLD: Original Data: %s" % (data)
         binData = bin(int(binascii.hexlify(data), 16))
         randomOffset = random.randint(2, len(binData)-1)
         binDataList = list(binData)
@@ -148,6 +149,7 @@ class PacketLossDelay:
         packet = pickle.dumps(header.pack())
         packet += data
         print "[+] PLD CORRUPT: Sending Corrupted Packet"
+        # header.info()
         s.send(packet)
 
     def checkHeldPacket(self):
@@ -201,6 +203,7 @@ class PacketLossDelay:
                 sendPacket(header, data)
                 return
             print "[+] PLD REORDER: Holding Back For %d Packets" % (MAXORDER)
+            # print data
             newHeader = STPHeader()
             newHeader.copy(header)
             self.heldPacket = (newHeader, data)
@@ -232,8 +235,8 @@ def sendPacket(header, data):
     packet = pickle.dumps(header.pack())
     if data != None:
         packet += data
-    #header.info()
-    #print "[+] Sending Packet With Data: %s" % data
+    # header.info()
+    # print "[+] Sending Packet With Data: %s" % data
     s.send(packet)
 
 # Read data from the provided file
@@ -252,11 +255,11 @@ def EstablishConnection():
     headerRecv = STPHeader()
     header = STPHeader()
     header.SYN = True
-    lastSeqNum = initialSeqNum()
-    lastAckNum = None
+    sentSeqNum = initialSeqNum()
+    sentAckNum = None
     seqNumRecv = None
     ackNumRecv = None
-    header.seqNum = lastSeqNum
+    header.seqNum = sentSeqNum
     print "[+] Connection Establishing: 1st Handshake"
     sendPacket(header, None)
     while True:
@@ -266,7 +269,7 @@ def EstablishConnection():
             print "[!] Connection Establishment Failed: Timeout"
             return None
         headerRecv.unpack(pickle.loads(packet))
-        if (headerRecv.SYN == True and headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+1):
+        if (headerRecv.SYN == True and headerRecv.ACK == True and headerRecv.ackNum == sentSeqNum+1):
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
             print "[+] Connection Establishing: 2nd Handshake"
@@ -276,13 +279,13 @@ def EstablishConnection():
             continue
     header.clear()
     header.ACK = True
-    header.seqNum = lastSeqNum + 1
+    header.seqNum = sentSeqNum + 1
     header.ackNum = seqNumRecv + 1
-    lastSeqNum += 1
-    lastAckNum = seqNumRecv + 1
+    sentSeqNum += 1
+    sentAckNum = seqNumRecv + 1
     print "[+] Connection Established: 3rd Handshake"
     sendPacket(header, None)
-    return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
+    return (sentSeqNum, sentAckNum, seqNumRecv, ackNumRecv)
 
 # Transfer the file to server without pipelining
 def SendFile(SentRecv):
@@ -290,8 +293,8 @@ def SendFile(SentRecv):
     global DEVRTT
     global TIMEOUT
     global TIMER
-    lastSeqNum = SentRecv[0]
-    lastAckNum = SentRecv[1]
+    sentSeqNum = SentRecv[0]
+    sentAckNum = SentRecv[1]
     seqNumRecv = SentRecv[2]
     ackNumRecv = SentRecv[3]
     header = STPHeader()
@@ -302,8 +305,8 @@ def SendFile(SentRecv):
     sentDataLen = 0
     header.SYN = True
     while len(data[offset:]) > 0:
-        header.seqNum = lastSeqNum
-        header.ackNum = lastAckNum
+        header.seqNum = sentSeqNum
+        header.ackNum = sentAckNum
         if len(data[offset:]) > MSS:
             segmentData = data[offset:offset+MSS]
         else:
@@ -327,13 +330,13 @@ def SendFile(SentRecv):
             headerRecv.unpack(pickle.loads(packet))
             #headerRecv.info()
             #print "[+] Packet Received"
-            if headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+sentDataLen:
+            if headerRecv.ACK == True and headerRecv.ackNum == sentSeqNum+sentDataLen:
                 print "[+] ACK Received"
                 seqNumRecv = headerRecv.seqNum
                 ackNumRecv = headerRecv.ackNum
                 offset += sentDataLen
-                lastSeqNum = ackNumRecv
-                lastAckNum = seqNumRecv + 1
+                sentSeqNum = ackNumRecv
+                sentAckNum = seqNumRecv + 1
                 break
 
 def PipelineSendFile(SentRecv):
@@ -341,51 +344,129 @@ def PipelineSendFile(SentRecv):
     global DEVRTT
     global TIMEOUT
     global TIMER
-    lastSeqNum = SentRecv[0]
-    lastAckNum = SentRecv[1]
-    seqNumRecv = SentRecv[2]
-    ackNumRecv = SentRecv[3]
+    global TIMERLIST
+    sentSeqNum = SentRecv[0]
+    sentAckNum = SentRecv[1]
     header = STPHeader()
     headerRecv = STPHeader()
     data = getDataFromFile()
     segmentData = None
     offset = 0
     sentDataLen = 0
+    sendBase = sentSeqNum
+    baseAck = sentAckNum
+    # sentList = []
+    baseOffset = sendBase
+    lastToAck = sentSeqNum
+    timeoutInterval = 0
+    duplicateList = []
+    dupExist = False
     header.SYN = True
-    while len(data[offset:]) > 0:
-        header.seqNum = lastSeqNum
-        header.ackNum = lastAckNum
-        if len(data[offset:]) > MSS:
-            segmentData = data[offset:offset+MSS]
-        else:
-            segmentData = data[offset:]
-        sentDataLen = len(segmentData)
-        #print "[+] Sending Data: %s" % segmentData
-        pld.sendPLDPacket(header, segmentData)
-        TIMER = time.time()
+    while len(data[sendBase-baseOffset:]) > 0:
+        while lastToAck - sendBase <= MWS:
+            if lastToAck - baseOffset >= len(data):
+                break
+            header.seqNum = sentSeqNum
+            header.ackNum = sentAckNum
+            offset = sentSeqNum - baseOffset
+            if len(data[offset:]) > MSS:
+                segmentData = data[offset:offset+MSS]
+            else:
+                segmentData = data[offset:]
+            sentDataLen = len(segmentData)
+            lastToAck = sentSeqNum + sentDataLen
+            for timer in TIMERLIST:
+                if timer[0] == lastToAck:
+                    TIMERLIST.remove(timer)
+                    break
+            TIMERLIST.append((lastToAck, time.time()))
+            pld.sendPLDPacket(header, segmentData)
+            # sentList.append((sentSeqNum, sentAckNum, lastToAck))
+            sentSeqNum += sentDataLen
+            sentAckNum += 1
+
+        timeoutInterval = time.time() + TIMEOUT
+        duplicateList = []
         while True:
+            if sendBase - baseOffset >= len(data):
+                break
+            if time.time() > timeoutInterval:
+                break
             try:
                 packet, addr = s.recvfrom(1024+MSS)
-                sampleRTT = time.time()-TIMER
-                ESTRTT = 0.875*ESTRTT + 0.125*(sampleRTT)
-                DEVRTT = 0.75*DEVRTT + 0.25*abs(sampleRTT-ESTRTT)
-                TIMEOUT = ESTRTT + GAMMA*DEVRTT
-                print "TIMEOUT INTERVAL: %s" % TIMEOUT
-                s.settimeout(TIMEOUT)
             except socket.timeout:
-                print "[!] Receiving ACK Timeout, Sending Packet Again"
+                print "[!] Receiving ACK Timeout, Sending Packets Again"
+                if sendBase - baseOffset >= len(data):
+                    break
+                header.seqNum = sendBase
+                header.ackNum = baseAck
+                offset = sendBase - baseOffset
+                if len(data[offset:]) > MSS:
+                    segmentData = data[offset:offset+MSS]
+                else:
+                    segmentData = data[offset:]
+                lastToAck = sendBase + sentDataLen
+                for timer in TIMERLIST:
+                    if timer[0] == lastToAck:
+                        TIMERLIST.remove(timer)
+                        break
+                TIMERLIST.append((lastToAck, time.time()))
+                pld.sendPLDPacket(header, segmentData)
                 break
-            headerRecv.unpack(pickle.loads(packet))
-            #headerRecv.info()
-            #print "[+] Packet Received"
-            if headerRecv.ACK == True and headerRecv.ackNum == lastSeqNum+sentDataLen:
-                print "[+] ACK Received"
-                seqNumRecv = headerRecv.seqNum
-                ackNumRecv = headerRecv.ackNum
-                offset += sentDataLen
-                lastSeqNum = ackNumRecv
-                lastAckNum = seqNumRecv + 1
-                break
+            try:
+                headerRecv.unpack(pickle.loads(packet))
+            except:
+                print "[!] Corrupted Header"
+                continue
+            for timer in TIMERLIST:
+                if timer[0] == headerRecv.ackNum:
+                    sampleRTT = time.time() - timer[1]
+                    ESTRTT = 0.875*ESTRTT + 0.125*(sampleRTT)
+                    DEVRTT = 0.75*DEVRTT + 0.25*abs(sampleRTT-ESTRTT)
+                    TIMEOUT = ESTRTT + GAMMA*DEVRTT
+                    print "TIMEOUT INTERVAL: %s" % TIMEOUT
+                    s.settimeout(TIMEOUT)
+                    TIMERLIST.remove(timer)
+                    break
+            if headerRecv.ACK == True and headerRecv.ackNum > sendBase:
+                sendBase = headerRecv.ackNum
+                baseAck = headerRecv.seqNum + 1
+                sentSeqNum = sendBase
+                sentAckNum = baseAck
+                # for i in range(len(sentList)):
+                #     sent = sentList[i]
+                #     if sent[2] == headerRecv.ackNum:
+                #         sentList = sentList[i+1:]
+                #         break
+            elif headerRecv.ACK == True and headerRecv.ackNum <= sendBase:
+                dupExist = False
+                for dup in duplicateList:
+                    if dup[0] == headerRecv.ackNum:
+                        dupExist = True
+                        if dup[1] == 3:
+                            sentSeqNum = headerRecv.ackNum
+                            sentAckNum = headerRecv.seqNum + 1
+                            header.seqNum = sentSeqNum
+                            header.ackNum = sentAckNum
+                            offset = sentSeqNum - baseOffset
+                            if len(data[offset:]) > MSS:
+                                segmentData = data[offset:offset+MSS]
+                            else:
+                                segmentData = data[offset:]
+                            lastToAck = sentSeqNum + sentDataLen
+                            for timer in TIMERLIST:
+                                if timer[0] == lastToAck:
+                                    TIMERLIST.remove(timer)
+                                    break
+                            TIMERLIST.append((lastToAck, time.time()))
+                            print "!!!!!!!!!!! Triple ACK !!!!!!!!!!"
+                            duplicateList.remove(dup)
+                            pld.sendPLDPacket(header, segmentData)
+                        else:
+                            dup[1] += 1
+                if not dupExist:
+                    duplicateList.append([headerRecv.ackNum, 1])
+                    
 
 # Closing the connection
 def CloseConnection():
@@ -490,7 +571,7 @@ def main():
             break
 
     # File Transfer State
-    SendFile(SentRecv)
+    PipelineSendFile(SentRecv)
 
     # Closing Connection
     CloseConnection()

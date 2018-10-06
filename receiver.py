@@ -105,7 +105,7 @@ def appendDataToFile(data):
 def sendPacket(header, addr):
     s.connect(addr)
     packet = pickle.dumps(header.pack())
-    #header.info()
+    # header.info()
     s.send(packet)
 
 # Wait for a connection to be established
@@ -147,16 +147,16 @@ def HandlePackets(SentRecv):
     headerRecv = STPHeader()
     lastSeqNum = SentRecv[0]
     lastAckNum = SentRecv[1]
-    seqNumRecv = SentRecv[2]
-    ackNumRecv = SentRecv[3]
     bufferInfo = []
     while True:
-        # print len(bufferInfo)
+        # print bufferInfo
         packet, addr = s.recvfrom(1024)
         headerRecv.unpack(pickle.loads(packet))
         if headerRecv.FIN == True:
             CloseConnection(addr)
             return
+        elif headerRecv.SYN != True:
+            continue
         data = packet[headerRecv.headerLength:]
         header.clear()
         if not headerRecv.verifyChecksum(data) or headerRecv.seqNum < lastAckNum:
@@ -166,7 +166,7 @@ def HandlePackets(SentRecv):
             header.seqNum = lastSeqNum
         elif headerRecv.seqNum == lastAckNum:
             print "[+] Correct Data Received"
-            #print "[+] Data: %s" % data
+            # print "[+] Data: %s" % data
             appendDataToFile(data)
             if bufferInfo:
                 nextSeq = headerRecv.seqNum
@@ -180,7 +180,13 @@ def HandlePackets(SentRecv):
                         header.ACK = True
                         header.ackNum = nextSeq + nextLen
                         header.seqNum = info[1]
+                        if i == len(bufferInfo)-1:
+                            bufferInfo = []
+                            break
                     else:
+                        header.ACK = True
+                        header.ackNum = nextSeq + nextLen
+                        header.seqNum = info[1]
                         bufferInfo = bufferInfo[i:]
                         break
             else:
@@ -197,6 +203,9 @@ def HandlePackets(SentRecv):
                 inserted = False
                 for i in range(len(bufferInfo)):
                     info = bufferInfo[i]
+                    if dataInfo[0] == info[0]:
+                        inserted = True
+                        break
                     if dataInfo[0] + dataInfo[2] <= info[0]:
                         inserted = True
                         bufferInfo.insert(i, dataInfo)
@@ -208,10 +217,12 @@ def HandlePackets(SentRecv):
             header.ACK = True
             header.ackNum = lastAckNum
             header.seqNum = lastSeqNum
-        seqNumRecv = headerRecv.seqNum
-        ackNumRecv = headerRecv.ackNum
+        else:
+            header.ACK = True
+            header.seqNum = lastSeqNum
+            header.ackNum = lastAckNum
         lastSeqNum = header.seqNum
-        lastAckNum = header.ackNum   
+        lastAckNum = header.ackNum  
         sendPacket(header, addr)             
 
 def CloseConnection(addr):
