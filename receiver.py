@@ -166,8 +166,8 @@ def HandlePackets(SentRecv):
             header.seqNum = lastSeqNum
         elif headerRecv.seqNum == lastAckNum:
             print "[+] Correct Data Received"
-            # print "[+] Data: %s" % data
             appendDataToFile(data)
+            # If Segment Connects With The Buffer, Send The Latest ACK
             if bufferInfo:
                 nextSeq = headerRecv.seqNum
                 nextLen = len(data)
@@ -193,6 +193,7 @@ def HandlePackets(SentRecv):
                 header.ACK = True
                 header.ackNum = headerRecv.seqNum + len(data)
                 header.seqNum = headerRecv.ackNum
+        # Buffer For Out-Of-Order Segments
         elif headerRecv.seqNum > lastAckNum:
             # Sequence Number, Acknoledgement Number, Length Of Data, Data 
             dataInfo = (int(headerRecv.seqNum), int(headerRecv.ackNum), len(data), data)

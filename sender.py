@@ -163,7 +163,8 @@ class PacketLossDelay:
             else:
                 print "[+] PLD REORDER: Already Held Back For %d Packet" % (self.waited)
         else:
-            print "[+] PLD REORDER: No Held Back Packet"
+            # print "[+] PLD REORDER: No Held Back Packet"
+            return
 
     def sendDelayPacket(self, header, data):
         delay = random.uniform(0, MAXDELAY)
@@ -287,7 +288,7 @@ def EstablishConnection():
     sendPacket(header, None)
     return (sentSeqNum, sentAckNum, seqNumRecv, ackNumRecv)
 
-# Transfer the file to server without pipelining
+# Transfer File Without Maximum Window Size
 def SendFile(SentRecv):
     global ESTRTT
     global DEVRTT
@@ -339,11 +340,11 @@ def SendFile(SentRecv):
                 sentAckNum = seqNumRecv + 1
                 break
 
+# Transfer File With Maximum Window Size
 def PipelineSendFile(SentRecv):
     global ESTRTT
     global DEVRTT
     global TIMEOUT
-    global TIMER
     global TIMERLIST
     sentSeqNum = SentRecv[0]
     sentAckNum = SentRecv[1]
@@ -355,7 +356,6 @@ def PipelineSendFile(SentRecv):
     sentDataLen = 0
     sendBase = sentSeqNum
     baseAck = sentAckNum
-    # sentList = []
     baseOffset = sendBase
     lastToAck = sentSeqNum
     timeoutInterval = 0
@@ -363,6 +363,7 @@ def PipelineSendFile(SentRecv):
     dupExist = False
     header.SYN = True
     while len(data[sendBase-baseOffset:]) > 0:
+        # Send Segments Until The Window Is Full
         while lastToAck - sendBase <= MWS:
             if lastToAck - baseOffset >= len(data):
                 break
@@ -381,15 +382,16 @@ def PipelineSendFile(SentRecv):
                     break
             TIMERLIST.append((lastToAck, time.time()))
             pld.sendPLDPacket(header, segmentData)
-            # sentList.append((sentSeqNum, sentAckNum, lastToAck))
             sentSeqNum += sentDataLen
             sentAckNum += 1
 
         timeoutInterval = time.time() + TIMEOUT
         duplicateList = []
+        # Wait For Reply With A Timeout Interval
         while True:
             if sendBase - baseOffset >= len(data):
                 break
+            # Timeout Interval Before Sending Again From Sendbase
             if time.time() > timeoutInterval:
                 break
             try:
@@ -398,6 +400,7 @@ def PipelineSendFile(SentRecv):
                 print "[!] Receiving ACK Timeout, Sending Packets Again"
                 if sendBase - baseOffset >= len(data):
                     break
+                # Timeout, Send Segments From The Sendbase again
                 header.seqNum = sendBase
                 header.ackNum = baseAck
                 offset = sendBase - baseOffset
@@ -418,6 +421,7 @@ def PipelineSendFile(SentRecv):
             except:
                 print "[!] Corrupted Header"
                 continue
+            # Update The Timeout Interval
             for timer in TIMERLIST:
                 if timer[0] == headerRecv.ackNum:
                     sampleRTT = time.time() - timer[1]
@@ -428,22 +432,20 @@ def PipelineSendFile(SentRecv):
                     s.settimeout(TIMEOUT)
                     TIMERLIST.remove(timer)
                     break
+            # Update Sendbase If Received ACK
             if headerRecv.ACK == True and headerRecv.ackNum > sendBase:
                 sendBase = headerRecv.ackNum
                 baseAck = headerRecv.seqNum + 1
                 sentSeqNum = sendBase
                 sentAckNum = baseAck
-                # for i in range(len(sentList)):
-                #     sent = sentList[i]
-                #     if sent[2] == headerRecv.ackNum:
-                #         sentList = sentList[i+1:]
-                #         break
+            # Check For Fast Retransmission
             elif headerRecv.ACK == True and headerRecv.ackNum <= sendBase:
                 dupExist = False
                 for dup in duplicateList:
                     if dup[0] == headerRecv.ackNum:
                         dupExist = True
                         if dup[1] == 3:
+                            print "!!!!!!!!!!!!! Triple ACK !!!!!!!!!!!!!"
                             sentSeqNum = headerRecv.ackNum
                             sentAckNum = headerRecv.seqNum + 1
                             header.seqNum = sentSeqNum
@@ -459,7 +461,6 @@ def PipelineSendFile(SentRecv):
                                     TIMERLIST.remove(timer)
                                     break
                             TIMERLIST.append((lastToAck, time.time()))
-                            print "!!!!!!!!!!! Triple ACK !!!!!!!!!!"
                             duplicateList.remove(dup)
                             pld.sendPLDPacket(header, segmentData)
                         else:
