@@ -1,28 +1,26 @@
 #!/usr/bin/python
 
-import socket, pickle, sys, md5, random, time
+import argparse, socket, pickle, sys, md5, random, time
 
 LOCALHOST = "127.0.0.1"
-RECEIVER_PORT = None
-STORED_FILE = None
 
 # Header structure and some useful functions
 class STPHeader:
     def __init__(self):
-        self.seqNum = None
-        self.ackNum = None
-        self.headerLength = None
-        self.checksum = None
+        self.seqNum = 0
+        self.ackNum = 0
+        self.headerLength = 0
+        self.checksum = ""
         self.SYN = False
         self.ACK = False
         self.FIN = False
     
     # Clear the header
     def clear(self):
-        self.seqNum = None
-        self.ackNum = None
-        self.headerLength = None
-        self.checksum = None
+        self.seqNum = 0
+        self.ackNum = 0
+        self.headerLength = 0
+        self.checksum = ""
         self.SYN = False
         self.ACK = False
         self.FIN = False
@@ -59,6 +57,7 @@ class STPHeader:
 
     # Calculate the header's length
     def getHeaderLength(self):
+        self.checksum += "a"*32
         data = pickle.dumps(self.pack())
         self.headerLength = len(data)
         data = pickle.dumps(self.pack())
@@ -67,14 +66,20 @@ class STPHeader:
     # Generate the md5 checksum for the provided data
     def generateChecksum(self, data):
         m = md5.new()
-        m.update(data)
-        self.checksum = m.digest()
+        checksumString = str(self.seqNum) + str(self.ackNum) + str(self.headerLength)
+        if data != None:
+            checksumString += data
+        m.update(checksumString)
+        self.checksum = m.hexdigest()
 
     # Verify the md5 checksum with the provided data
     def verifyChecksum(self, data):
         m = md5.new()
-        m.update(data)
-        if m.digest() == self.checksum:
+        checksumString = str(self.seqNum) + str(self.ackNum) + str(self.headerLength)
+        if data != "":
+            checksumString += data
+        m.update(checksumString)
+        if m.hexdigest() == self.checksum:
             return True
         return False
 
@@ -94,11 +99,11 @@ def initialSeqNum():
     return random.randint(0, 1000000)
 
 def clearFile():
-    f = open(STORED_FILE, "w")
+    f = open(args.STORED_FILE, "w")
     f.close()
 
 def appendDataToFile(data):
-    f = open(STORED_FILE, "a")
+    f = open(args.STORED_FILE, "a")
     f.write(data)
     f.close()
 
@@ -108,14 +113,24 @@ def sendPacket(header, addr):
     # header.info()
     s.send(packet)
 
+def verbosePrint(type, message):
+    if not args.verbose:
+        return
+    if type == "error":
+        print "[!] %s" % message
+    elif type == "normal":
+        print "[+] %s" % message
+    elif type == "info":
+        print message
+
 # Wait for a connection to be established
 def EstablishConnection():
     headerRecv = STPHeader()
     header = STPHeader()
     lastSeqNum = initialSeqNum()
-    lastAckNum = None
-    seqNumRecv = None
-    ackNumRecv = None
+    lastAckNum = 0
+    seqNumRecv = 0
+    ackNumRecv = 0
     while True:
         packet, addr = s.recvfrom(1024)
         headerRecv.unpack(pickle.loads(packet))
@@ -127,11 +142,11 @@ def EstablishConnection():
             header.seqNum = lastSeqNum
             header.ackNum = seqNumRecv + 1
             lastAckNum = seqNumRecv + 1
-            print "[+] Connection Establishing: Sending SYN/ACK Packet"
+            verbosePrint("normal", "Connection Establishing: Sending SYN/ACK Packet")
             sendPacket(header, addr)
             break
         else:
-            print "[!] Connection Establishing: False Packet received"
+            verbosePrint("error", "Connection Establishing: False Packet received")
             continue
     while True:
         packet, addr = s.recvfrom(1024)
@@ -139,7 +154,7 @@ def EstablishConnection():
         if headerRecv.ACK == True:
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
-            print "[+] Connection Established"
+            verbosePrint("normal", "Connection Established")
             return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
 
 def HandlePackets(SentRecv):
@@ -149,23 +164,30 @@ def HandlePackets(SentRecv):
     lastAckNum = SentRecv[1]
     bufferInfo = []
     while True:
-        # print bufferInfo
         packet, addr = s.recvfrom(1024)
-        headerRecv.unpack(pickle.loads(packet))
-        if headerRecv.FIN == True:
-            CloseConnection(addr)
+        try:
+            headerRecv.unpack(pickle.loads(packet))
+        except:
+            verbosePrint("error", "Corrupted Header Received")
+            header.ACK = True
+            header.ackNum = lastAckNum
+            header.seqNum = lastSeqNum
+            sendPacket(header, addr)
+            continue
+        if headerRecv.FIN == True and headerRecv.seqNum == lastAckNum:
+            CloseConnection(addr, headerRecv)
             return
         elif headerRecv.SYN != True:
             continue
         data = packet[headerRecv.headerLength:]
         header.clear()
         if not headerRecv.verifyChecksum(data) or headerRecv.seqNum < lastAckNum:
-            print "[!] Corrupted Data Received"
+            verbosePrint("error", "Corrupted Data Received")
             header.ACK = True
             header.ackNum = lastAckNum
             header.seqNum = lastSeqNum
         elif headerRecv.seqNum == lastAckNum:
-            print "[+] Correct Data Received"
+            verbosePrint("normal", "Correct Data Received")
             appendDataToFile(data)
             # If Segment Connects With The Buffer, Send The Latest ACK
             if bufferInfo:
@@ -226,16 +248,18 @@ def HandlePackets(SentRecv):
         lastAckNum = header.ackNum  
         sendPacket(header, addr)             
 
-def CloseConnection(addr):
+def CloseConnection(addr, lastPacket):
     headerRecv = STPHeader()
     header = STPHeader()
     header.ACK = True
-    print "[+] Closing Connection: Sending ACK Packet"
+    header.ackNum = lastPacket.seqNum + 1
+    header.seqNum = lastPacket.ackNum
+    verbosePrint("normal", "Closing Connection: Sending ACK Packet")
     sendPacket(header, addr)
     # Enter CLOSE_WAIT state
-    header.clear()
+    header.ACK = False
     header.FIN = True
-    print "[+] Closing Connection: Sending FIN Packet"
+    verbosePrint("normal", "Closing Connection: Sending FIN Packet")
     sendPacket(header, addr)
     # Enter LAST_ACK state
     while True:
@@ -243,20 +267,20 @@ def CloseConnection(addr):
         headerRecv.unpack(pickle.loads(packet))
         if headerRecv.ACK == True:
             s.close()
-            print "[+] Connection Closed"
+            verbosePrint("normal", "Connection Closed")
             return
         else:
-            print "[!] LAST_ACK: Wrong Packet Received"
+            verbosePrint("error", "LAST_ACK: Wrong Packet Received")
 
-try:
-    RECEIVER_PORT = int(sys.argv[1])
-    STORED_FILE = sys.argv[2]
-except:
-    print "Usage:\tpython receiver.py <receiver_port> <file_r.pdf>"
-    sys.exit(1)
+# Parse the arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("RECEIVER_PORT", type=int, help="The port number on which the Receiver will open a UDP socket for receiving datagrams from the Sender")
+parser.add_argument("STORED_FILE", type=str, help="The name of the pdf file into which the data sent by the sender should be stored")
+parser.add_argument("-v", "--verbose", help="Print Sender's actions", action="store_true")
+args = parser.parse_args()
 
 # Create a global socket and bind to it
-ADDRESS = (LOCALHOST, RECEIVER_PORT)
+ADDRESS = (LOCALHOST, args.RECEIVER_PORT)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(ADDRESS)
 
@@ -267,7 +291,7 @@ def main():
     clearFile()
     # Handle Remaining Packets
     HandlePackets(SentRecv)
-    print "[+] Exiting Program"
+    verbosePrint("normal", "Exiting Program")
     sys.exit(0)
 
 if __name__ == "__main__":
