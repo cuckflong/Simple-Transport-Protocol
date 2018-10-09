@@ -16,6 +16,19 @@ DEVRTT = 0.25   # 250 millisecond
 TIMER = 0
 TIMERLIST = []
 
+# Statistics
+FILESIZE = 0
+SEGMENTS = 0
+PLDSEGMENTS = 0
+DROPPED = 0
+CORRUPTED = 0
+REORDERED = 0
+DUPLICATED = 0
+DELAYED = 0
+TIMEOUTRETRANS = 0
+FASTRETRANS = 0
+DUPACK = 0
+
 # Header structure and some useful functions
 class STPHeader:
     def __init__(self):
@@ -166,12 +179,21 @@ class PacketLossDelay:
             sys.exit(1)
 
     def sendPLDPacket(self, header, data):
+        global PLDSEGMENTS
+        global DROPPED
+        global CORRUPTED
+        global REORDERED
+        global DUPLICATED
+        global DELAYED
+        PLDSEGMENTS += 1
         if self.flip(args.PDROP):
+            DROPPED += 1
             verbosePrint("normal", "PLD DROP: Packet Dropped")
             writeLog("drop", header, len(data))
             self.checkHeldPacket()
             return
         if self.flip(args.PDUPLICATE):
+            DUPLICATED += 1
             verbosePrint("normal", "PLD DUPLICATE: Duplicating Packet")
             sendPacket(header, data)
             writeLog("snd", header, len(data))
@@ -180,6 +202,7 @@ class PacketLossDelay:
             self.checkHeldPacket()
             return
         if self.flip(args.PCORRUPT):
+            CORRUPTED += 1
             verbosePrint("normal", "PLD CORRUPT: Corrupting Packet")
             self.sendCorruptPacket(header, data)
             writeLog("snd/corr", header, len(data))
@@ -198,6 +221,7 @@ class PacketLossDelay:
                 sendPacket(header, data)
                 writeLog("snd", header, len(data))
                 return
+            REORDERED += 1
             verbosePrint("normal", "PLD REORDER: Holding Back For %d Packets" % (args.MAXORDER))
             newHeader = STPHeader()
             newHeader.copy(header)
@@ -205,6 +229,7 @@ class PacketLossDelay:
             self.waited = 0
             return
         if self.flip(args.PDELAY):
+            DELAYED += 1
             verbosePrint("normal", "PLD DELAY: Delaying Packet")
             tmpHeader = STPHeader()
             tmpHeader.copy(header)
@@ -218,7 +243,6 @@ class PacketLossDelay:
                 sys.exit(1)
             self.checkHeldPacket()
             return
-
         verbosePrint("normal", "PLD NORMAL: Sending Normal Packet")
         sendPacket(header, data)
         writeLog("snd", header, len(data))
@@ -244,8 +268,10 @@ def sendPacket(header, data):
 
 # Read data from the provided file
 def getDataFromFile():
+    global FILESIZE
     f = open(args.FILE, "r")
     data = f.read()
+    FILESIZE = len(data)
     f.close()
     return data
 
@@ -264,9 +290,25 @@ def writeLog(event, header, dataLen):
         packetType = "F"
     else:
         packetType = "Unknown"
-    line = "%20s%20f%20s%20d%20d%20d" % (event, current, packetType, header.seqNum, dataLen, header.ackNum)
+    line = "%-20s%-20.2f%-20s%-20d%-20d%-20d" % (event, current, packetType, header.seqNum, dataLen, header.ackNum)
     log.write(line + "\n")
-    pass
+
+# Write statistic to log file
+def writeStatistic():
+    log.write("\n")
+    log.write("="*72 + "\n")
+    log.write("%-60s%10d\n" % ("Size Of The File (bytes)", FILESIZE))
+    log.write("%-60s%10d\n" % ("Segments Transmitted (Including Drop & RXT)", SEGMENTS))
+    log.write("%-60s%10d\n" % ("Number Of Segments Handled By PLD", PLDSEGMENTS))
+    log.write("%-60s%10d\n" % ("Number Of Segments Dropped", DROPPED))
+    log.write("%-60s%10d\n" % ("Number Of Segments Corrupted", CORRUPTED))
+    log.write("%-60s%10d\n" % ("Number Of Segments Re-Ordered", REORDERED))
+    log.write("%-60s%10d\n" % ("Number Of Segments Duplicated", DUPLICATED))
+    log.write("%-60s%10d\n" % ("Number Of Segments Delayed", DELAYED))
+    log.write("%-60s%10d\n" % ("Number Of Retransmissions Due To TIMEOUT", TIMEOUTRETRANS))
+    log.write("%-60s%10d\n" % ("Number Of FAST RETRANSMISSION", FASTRETRANS))
+    log.write("%-60s%10d\n" % ("Number Of DUP ACKs Received", DUPACK))
+    log.write("="*72)
 
 # Randomly generate the initial sequence number
 def initialSeqNum():
@@ -274,6 +316,7 @@ def initialSeqNum():
 
 # Establish the connection with a three-way handshake
 def EstablishConnection():
+    global SEGMENTS
     headerRecv = STPHeader()
     header = STPHeader()
     header.SYN = True
@@ -284,6 +327,7 @@ def EstablishConnection():
     header.seqNum = sentSeqNum
     verbosePrint("normal", "Connection Establishing: 1st Handshake")
     sendPacket(header, None)
+    SEGMENTS += 1
     writeLog("snd", header, 0)
     while True:
         try:
@@ -313,6 +357,7 @@ def EstablishConnection():
     sentAckNum = seqNumRecv + 1
     verbosePrint("normal", "Connection Established: 3rd Handshake")
     sendPacket(header, None)
+    SEGMENTS += 1
     writeLog("snd", header, 0)
     return (sentSeqNum, sentAckNum, seqNumRecv, ackNumRecv)
 
@@ -322,6 +367,10 @@ def PipelineSendFile(SentRecv):
     global DEVRTT
     global TIMEOUT
     global TIMERLIST
+    global SEGMENTS
+    global TIMEOUTRETRANS
+    global FASTRETRANS
+    global DUPACK
     sentSeqNum = SentRecv[0]
     sentAckNum = SentRecv[1]
     header = STPHeader()
@@ -358,6 +407,7 @@ def PipelineSendFile(SentRecv):
                     break
             TIMERLIST.append((lastToAck, time.time()))
             pld.sendPLDPacket(header, segmentData)
+            SEGMENTS += 1
             sentSeqNum += sentDataLen
             sentAckNum += 1
 
@@ -369,10 +419,12 @@ def PipelineSendFile(SentRecv):
                 break
             # Timeout Interval Before Sending Again From Sendbase
             if time.time() > timeoutInterval:
+                TIMEOUTRETRANS += 1
                 break
             try:
                 packet, addr = s.recvfrom(1024+args.MSS)
             except socket.timeout:
+                TIMEOUTRETRANS += 1
                 verbosePrint("error", "Receiving ACK Timeout, Sending Packets Again")
                 if sendBase - baseOffset >= len(data):
                     break
@@ -391,6 +443,7 @@ def PipelineSendFile(SentRecv):
                         break
                 TIMERLIST.append((lastToAck, time.time()))
                 pld.sendPLDPacket(header, segmentData)
+                SEGMENTS += 1
                 break
             try:
                 headerRecv.unpack(pickle.loads(packet))
@@ -418,6 +471,7 @@ def PipelineSendFile(SentRecv):
             # Check For Fast Retransmission
             elif headerRecv.ACK == True and headerRecv.ackNum <= sendBase:
                 dupExist = False
+                DUPACK += 1
                 for dup in duplicateList:
                     if dup[0] == headerRecv.ackNum:
                         dupExist = True
@@ -440,6 +494,8 @@ def PipelineSendFile(SentRecv):
                             TIMERLIST.append((lastToAck, time.time()))
                             duplicateList.remove(dup)
                             sendPacket(header, segmentData)
+                            SEGMENTS += 1
+                            FASTRETRANS += 1
                             writeLog("snd/RXT", header, len(segmentData))
                         else:
                             writeLog("rcv/DA", headerRecv, 0)
@@ -453,6 +509,7 @@ def PipelineSendFile(SentRecv):
 
 # Closing the connection
 def CloseConnection(lastPacket):
+    global SEGMENTS
     headerRecv = STPHeader()
     header = STPHeader()
     header.FIN = True
@@ -460,6 +517,7 @@ def CloseConnection(lastPacket):
     header.ackNum = lastPacket.seqNum
     verbosePrint("normal", "Closing Connection: Sending FIN Packet")
     sendPacket(header, None)
+    SEGMENTS += 1
     writeLog("snd", header, 0)
     # Enter FIN_WAIT_1 state
     while True:
@@ -498,6 +556,7 @@ def CloseConnection(lastPacket):
             header.ackNum = headerRecv.seqNum + 1
             verbosePrint("normal", "Closing Connection: Sending ACK Packet")
             sendPacket(header, None)
+            SEGMENTS += 1
             writeLog("snd", header, 0)
             verbosePrint("normal", "FIN_WAIT_2: Done")
             break
@@ -551,11 +610,13 @@ pld = PacketLossDelay()
 
 # Open log file for writing
 log = open(LOGFILE, "w")
+log.write("%-20s%-20s%-20s%-20s%-20s%-20s\n\n" % ("Event", "Time", "Type Of Packet", "Sequence Number", "Data Bytes", "Acknowledge Number"))
 
 def main():
     # A global timer for log file
     global TIMER
     TIMER = time.time()
+
     # A loop to ensure the connection is established
     while True:
         SentRecv = EstablishConnection()
@@ -567,6 +628,13 @@ def main():
 
     # Closing Connection
     CloseConnection(lastPacket)
+
+    # Write Statistics
+    writeStatistic()
+    log.close()
+
+    # Finish
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

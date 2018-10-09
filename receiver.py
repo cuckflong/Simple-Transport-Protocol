@@ -2,7 +2,22 @@
 
 import argparse, socket, pickle, sys, md5, random, time
 
+# Localhost
 LOCALHOST = "127.0.0.1"
+
+# Log File
+LOGFILE = "Receiver_log.txt"
+
+# Statistics
+DATARECEIVED = 0
+SEGMENTS = 0
+DATASEGMENTS = 0
+ERRORSEGMENTS = 0
+DUPSEGMENTS = 0
+DUPACK = 0
+
+# Timer
+TIMER = 0
 
 # Header structure and some useful functions
 class STPHeader:
@@ -103,6 +118,8 @@ def clearFile():
     f.close()
 
 def appendDataToFile(data):
+    global DATARECEIVED
+    DATARECEIVED += len(data)
     f = open(args.STORED_FILE, "a")
     f.write(data)
     f.close()
@@ -123,8 +140,43 @@ def verbosePrint(type, message):
     elif type == "info":
         print message
 
+# Write information to log file
+def writeLog(event, header, dataLen):
+    current = round(time.time() - TIMER, 3)
+    if header == None:
+        line = "%-20s%-20.2f Corrupted Header" % (event, current)
+        return
+    if dataLen > 0:
+        packetType = "D"
+    elif header.SYN and header.ACK:
+        packetType = "SA"
+    elif header.SYN:
+        packetType = "S"
+    elif header.ACK:
+        packetType = "A"
+    elif header.FIN:
+        packetType = "F"
+    else:
+        packetType = "Unknown"
+    line = "%-20s%-20.2f%-20s%-20d%-20d%-20d" % (event, current, packetType, header.seqNum, dataLen, header.ackNum)
+    log.write(line + "\n")
+
+# Write statistic to log file
+def writeStatistic():
+    log.write("\n")
+    log.write("="*72 + "\n")
+    log.write("%-60s%10d\n" % ("Amount Of Data Received (bytes)", DATARECEIVED))
+    log.write("%-60s%10d\n" % ("Total Segments Received", SEGMENTS))
+    log.write("%-60s%10d\n" % ("Data Segments Received", DATASEGMENTS))
+    log.write("%-60s%10d\n" % ("Data Segments With Bit Errors", ERRORSEGMENTS))
+    log.write("%-60s%10d\n" % ("Duplicate Data Segments Received", DUPSEGMENTS))
+    log.write("%-60s%10d\n" % ("Duplicate ACKs Sent", DUPACK))
+    log.write("="*72)
+
 # Wait for a connection to be established
 def EstablishConnection():
+    global SEGMENTS
+    global TIMER
     headerRecv = STPHeader()
     header = STPHeader()
     lastSeqNum = initialSeqNum()
@@ -133,7 +185,14 @@ def EstablishConnection():
     ackNumRecv = 0
     while True:
         packet, addr = s.recvfrom(1024)
-        headerRecv.unpack(pickle.loads(packet))
+        try:
+            headerRecv.unpack(pickle.loads(packet))
+            TIMER = time.time()
+            writeLog("rcv", headerRecv, 0)
+            SEGMENTS += 1
+        except:
+            verbosePrint("error", "Corrupted Header Received")
+            continue
         if headerRecv.SYN == True:
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
@@ -144,13 +203,20 @@ def EstablishConnection():
             lastAckNum = seqNumRecv + 1
             verbosePrint("normal", "Connection Establishing: Sending SYN/ACK Packet")
             sendPacket(header, addr)
+            writeLog("snd", header, 0)
             break
         else:
             verbosePrint("error", "Connection Establishing: False Packet received")
             continue
     while True:
         packet, addr = s.recvfrom(1024)
-        headerRecv.unpack(pickle.loads(packet))
+        try:
+            headerRecv.unpack(pickle.loads(packet))
+            writeLog("rcv", headerRecv, 0)
+            SEGMENTS += 1
+        except:
+            verbosePrint("error", "Corrupted Header Received")
+            continue
         if headerRecv.ACK == True:
             seqNumRecv = headerRecv.seqNum
             ackNumRecv = headerRecv.ackNum
@@ -158,6 +224,11 @@ def EstablishConnection():
             return (lastSeqNum, lastAckNum, seqNumRecv, ackNumRecv)
 
 def HandlePackets(SentRecv):
+    global SEGMENTS
+    global DATASEGMENTS
+    global ERRORSEGMENTS
+    global DUPSEGMENTS
+    global DUPACK
     header = STPHeader()
     headerRecv = STPHeader()
     lastSeqNum = SentRecv[0]
@@ -168,26 +239,38 @@ def HandlePackets(SentRecv):
         try:
             headerRecv.unpack(pickle.loads(packet))
         except:
+            SEGMENTS += 1
+            ERRORSEGMENTS += 1
+            writeLog("rcv/corr", None, 0)
             verbosePrint("error", "Corrupted Header Received")
             header.ACK = True
             header.ackNum = lastAckNum
             header.seqNum = lastSeqNum
             sendPacket(header, addr)
+            writeLog("snd/DA", header, 0)
             continue
         if headerRecv.FIN == True and headerRecv.seqNum == lastAckNum:
+            SEGMENTS += 1
+            writeLog("rcv", headerRecv, 0)
             CloseConnection(addr, headerRecv)
             return
         elif headerRecv.SYN != True:
             continue
         data = packet[headerRecv.headerLength:]
         header.clear()
-        if not headerRecv.verifyChecksum(data) or headerRecv.seqNum < lastAckNum:
+        SEGMENTS += 1
+        DATASEGMENTS += 1
+        if not headerRecv.verifyChecksum(data):
+            ERRORSEGMENTS += 1
+            writeLog("rcv/corr", headerRecv, len(data))
             verbosePrint("error", "Corrupted Data Received")
             header.ACK = True
             header.ackNum = lastAckNum
             header.seqNum = lastSeqNum
+            writeLog("snd/DA", header, 0)
         elif headerRecv.seqNum == lastAckNum:
             verbosePrint("normal", "Correct Data Received")
+            writeLog("rcv", headerRecv, len(data))
             appendDataToFile(data)
             # If Segment Connects With The Buffer, Send The Latest ACK
             if bufferInfo:
@@ -215,8 +298,11 @@ def HandlePackets(SentRecv):
                 header.ACK = True
                 header.ackNum = headerRecv.seqNum + len(data)
                 header.seqNum = headerRecv.ackNum
+            writeLog("snd", header, 0)
         # Buffer For Out-Of-Order Segments
         elif headerRecv.seqNum > lastAckNum:
+            DUPACK += 1
+            writeLog("rcv", headerRecv, len(data))
             # Sequence Number, Acknoledgement Number, Length Of Data, Data 
             dataInfo = (int(headerRecv.seqNum), int(headerRecv.ackNum), len(data), data)
             if not bufferInfo:
@@ -240,15 +326,21 @@ def HandlePackets(SentRecv):
             header.ACK = True
             header.ackNum = lastAckNum
             header.seqNum = lastSeqNum
+            writeLog("snd/DA", header, 0)
         else:
+            writeLog("rcv", headerRecv, len(data))
+            DUPSEGMENTS += 1
+            DUPACK += 1
             header.ACK = True
             header.seqNum = lastSeqNum
             header.ackNum = lastAckNum
+            writeLog("snd/DA", header, 0)
         lastSeqNum = header.seqNum
         lastAckNum = header.ackNum  
         sendPacket(header, addr)             
 
 def CloseConnection(addr, lastPacket):
+    global SEGMENTS
     headerRecv = STPHeader()
     header = STPHeader()
     header.ACK = True
@@ -256,15 +348,23 @@ def CloseConnection(addr, lastPacket):
     header.seqNum = lastPacket.ackNum
     verbosePrint("normal", "Closing Connection: Sending ACK Packet")
     sendPacket(header, addr)
+    writeLog("snd", header, 0)
     # Enter CLOSE_WAIT state
     header.ACK = False
     header.FIN = True
     verbosePrint("normal", "Closing Connection: Sending FIN Packet")
     sendPacket(header, addr)
+    writeLog("snd", header, 0)
     # Enter LAST_ACK state
     while True:
         packet, addr = s.recvfrom(1024)
-        headerRecv.unpack(pickle.loads(packet))
+        try:
+            headerRecv.unpack(pickle.loads(packet))
+            writeLog("rcv", headerRecv, 0)
+            SEGMENTS += 1
+        except:
+            verbosePrint("error", "Corrupted Header Received")
+            continue
         if headerRecv.ACK == True:
             s.close()
             verbosePrint("normal", "Connection Closed")
@@ -284,13 +384,25 @@ ADDRESS = (LOCALHOST, args.RECEIVER_PORT)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(ADDRESS)
 
+# Open log file for writing
+log = open(LOGFILE, "w")
+log.write("%-20s%-20s%-20s%-20s%-20s%-20s\n\n" % ("Event", "Time", "Type Of Packet", "Sequence Number", "Data Bytes", "Acknowledge Number"))
+
 def main():
     # Wait for a connection to be established
     SentRecv = EstablishConnection()
+
     # Clear the data in file
     clearFile()
+    
     # Handle Remaining Packets
     HandlePackets(SentRecv)
+
+    # Write Statistics
+    writeStatistic()
+    log.close()
+
+    # Finish
     verbosePrint("normal", "Exiting Program")
     sys.exit(0)
 
