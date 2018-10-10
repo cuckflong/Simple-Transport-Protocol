@@ -139,7 +139,9 @@ class PacketLossDelay:
         header.getHeaderLength()
         header.generateChecksum(data)
         # Reverse one bit of the data
-        binData = bin(int(binascii.hexlify(data), 16))
+        packet = pickle.dumps(header.pack())
+        packet += data
+        binData = bin(int(binascii.hexlify(packet), 16))
         randomOffset = random.randint(2, len(binData)-1)
         binDataList = list(binData)
         if binDataList[randomOffset] == "1":
@@ -148,13 +150,16 @@ class PacketLossDelay:
             binDataList[randomOffset] = "1"
         binData = "".join(binDataList)
         try:
-            data = binascii.unhexlify('%x' % int(binData, 2))
+            packet = binascii.unhexlify('%x' % int(binData, 2))
         except:
-            data = binascii.unhexlify('0%x' % int(binData, 2))
-        packet = pickle.dumps(header.pack())
-        packet += data
+            packet = binascii.unhexlify('0%x' % int(binData, 2))
+        # packet = pickle.dumps(header.pack())
+        # packet += data
         verbosePrint("normal", "PLD CORRUPT: Sending Corrupted Packet")
-        s.send(packet)
+        try:
+            s.send(packet)
+        except:
+            pass
 
     def checkHeldPacket(self):
         if self.heldPacket != None:
@@ -264,7 +269,10 @@ def sendPacket(header, data):
     packet = pickle.dumps(header.pack())
     if data != None:
         packet += data
-    s.send(packet)
+    try:
+        s.send(packet)
+    except:
+        pass
 
 # Read data from the provided file
 def getDataFromFile():

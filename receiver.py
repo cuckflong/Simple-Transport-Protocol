@@ -249,13 +249,6 @@ def HandlePackets(SentRecv):
             sendPacket(header, addr)
             writeLog("snd/DA", header, 0)
             continue
-        if headerRecv.FIN == True and headerRecv.seqNum == lastAckNum:
-            SEGMENTS += 1
-            writeLog("rcv", headerRecv, 0)
-            CloseConnection(addr, headerRecv)
-            return
-        elif headerRecv.SYN != True:
-            continue
         data = packet[headerRecv.headerLength:]
         header.clear()
         SEGMENTS += 1
@@ -268,6 +261,14 @@ def HandlePackets(SentRecv):
             header.ackNum = lastAckNum
             header.seqNum = lastSeqNum
             writeLog("snd/DA", header, 0)
+        elif headerRecv.FIN == True and headerRecv.SYN == False and headerRecv.seqNum == lastAckNum:
+            SEGMENTS += 1
+            writeLog("rcv", headerRecv, 0)
+            headerRecv.info()
+            CloseConnection(addr, headerRecv)
+            return
+        elif headerRecv.SYN != True:
+            continue
         elif headerRecv.seqNum == lastAckNum:
             verbosePrint("normal", "Correct Data Received")
             writeLog("rcv", headerRecv, len(data))
