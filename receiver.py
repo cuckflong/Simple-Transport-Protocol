@@ -145,6 +145,7 @@ def writeLog(event, header, dataLen):
     current = round(time.time() - TIMER, 3)
     if header == None:
         line = "%-20s%-20.2f Corrupted Header" % (event, current)
+        log.write(line + "\n")
         return
     if dataLen > 0:
         packetType = "D"
