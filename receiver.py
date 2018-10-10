@@ -264,7 +264,6 @@ def HandlePackets(SentRecv):
         elif headerRecv.FIN == True and headerRecv.SYN == False and headerRecv.seqNum == lastAckNum:
             SEGMENTS += 1
             writeLog("rcv", headerRecv, 0)
-            headerRecv.info()
             CloseConnection(addr, headerRecv)
             return
         elif headerRecv.SYN != True:
