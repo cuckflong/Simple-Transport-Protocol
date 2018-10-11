@@ -397,7 +397,7 @@ def PipelineSendFile(SentRecv):
     header.SYN = True
     while len(data[sendBase-baseOffset:]) > 0:
         # Send Segments Until The Window Is Full
-        while lastToAck - sendBase <= args.MWS:
+        while lastToAck - sendBase < args.MWS:
             if lastToAck - baseOffset >= len(data):
                 break
             header.seqNum = sentSeqNum
